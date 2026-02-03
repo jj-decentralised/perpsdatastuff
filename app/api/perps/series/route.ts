@@ -65,7 +65,8 @@ const mapLimit = async <T, R>(items: T[], limit: number, fn: (item: T) => Promis
 };
 
 const toDateKey = (ts: number) => {
-  const dt = new Date(ts * 1000);
+  const millis = ts > 1e12 ? ts : ts * 1000;
+  const dt = new Date(millis);
   return dt.toISOString().slice(0, 10);
 };
 
@@ -103,6 +104,45 @@ const normalizeDailyVolume = (items: any[]) => {
   return out;
 };
 
+const normalizeDerivatives = (payload: any) => {
+  if (Array.isArray(payload?.dailyVolume)) {
+    return normalizeDailyVolume(payload.dailyVolume);
+  }
+  if (Array.isArray(payload?.totalDataChart)) {
+    const volumeSeries = normalizePairSeries(payload.totalDataChart);
+    const out: Record<string, { volume?: number; openInterest?: number }> = {};
+    Object.entries(volumeSeries).forEach(([date, value]) => {
+      out[date] = { volume: value };
+    });
+    return out;
+  }
+  return {} as Record<string, { volume?: number; openInterest?: number }>;
+};
+
+const normalizeBreakdownSeries = (
+  breakdown: any,
+  slugByName: Map<string, string>
+) => {
+  const out: Record<string, Record<string, number>> = {};
+  if (!Array.isArray(breakdown)) return out;
+  for (const entry of breakdown) {
+    if (!Array.isArray(entry) || entry.length < 2) continue;
+    const ts = entry[0];
+    const values = entry[1];
+    if (typeof ts !== "number" || !values || typeof values !== "object") continue;
+    const dateKey = toDateKey(ts);
+    if (new Date(dateKey) < START_DATE) continue;
+    for (const [name, raw] of Object.entries(values)) {
+      const slug = slugByName.get(name) || slugByName.get(String(name).toLowerCase());
+      if (!slug) continue;
+      const value = typeof raw === "number" ? raw : Number(raw);
+      if (!Number.isFinite(value)) continue;
+      out[slug] = out[slug] || {};
+      out[slug][dateKey] = value;
+    }
+  }
+  return out;
+};
 const normalizeMarketCaps = (pairs: any[]) => {
   const out: Record<string, number> = {};
   for (const entry of pairs || []) {
@@ -234,6 +274,16 @@ export async function GET(request: Request) {
       selected = candidates.slice(0, limit);
     }
 
+    const slugByName = new Map<string, string>();
+    candidates.forEach((item) => {
+      slugByName.set(item.name, item.slug);
+      slugByName.set(item.name.toLowerCase(), item.slug);
+    });
+    const overviewVolumeBySlug = normalizeBreakdownSeries(
+      overview?.totalDataChartBreakdown,
+      slugByName
+    );
+
     const seriesList = await mapLimit(selected, 4, async (protocol) => {
       const [derivativesResult, feesResult, marketCapResult] = await Promise.allSettled([
         defillamaFetch(`/api/summary/derivatives/${encodeURIComponent(protocol.slug)}`),
@@ -264,7 +314,14 @@ export async function GET(request: Request) {
       const fees = feesResult.status === "fulfilled" ? feesResult.value : null;
       const marketCap = marketCapResult.status === "fulfilled" ? marketCapResult.value : null;
 
-      const volumeSeries = normalizeDailyVolume(derivatives?.dailyVolume || []);
+      let volumeSeries = normalizeDerivatives(derivatives);
+      if (!Object.keys(volumeSeries).length && overviewVolumeBySlug[protocol.slug]) {
+        const fallback = overviewVolumeBySlug[protocol.slug];
+        volumeSeries = Object.entries(fallback).reduce((acc, [date, value]) => {
+          acc[date] = { volume: value };
+          return acc;
+        }, {} as Record<string, { volume?: number; openInterest?: number }>);
+      }
       const feesSeries = normalizePairSeries(fees?.totalDataChart || []);
       const marketCaps = normalizeMarketCaps(marketCap?.market_caps || []);
 
