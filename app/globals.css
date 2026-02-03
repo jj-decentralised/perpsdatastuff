@@ -125,6 +125,14 @@ h2 {
   overflow-x: auto;
 }
 
+.table-card__title {
+  padding: 12px 16px 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;

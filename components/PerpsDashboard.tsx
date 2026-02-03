@@ -267,6 +267,12 @@ export default function PerpsDashboard() {
       .sort((a, b) => (b.volume || 0) - (a.volume || 0));
   }, [payload]);
 
+  const [snapshotsWithMcap, snapshotsWithoutMcap] = useMemo(() => {
+    const withMcap = snapshots.filter((row) => typeof row.marketCap === "number");
+    const withoutMcap = snapshots.filter((row) => typeof row.marketCap !== "number");
+    return [withMcap, withoutMcap];
+  }, [snapshots]);
+
   const windowSnapshots = useMemo(() => {
     if (!payload?.protocols) return [];
     return payload.protocols
@@ -274,6 +280,12 @@ export default function PerpsDashboard() {
       .filter((row): row is WindowRow => Boolean(row))
       .sort((a, b) => (b.volumeSum || 0) - (a.volumeSum || 0));
   }, [payload]);
+
+  const [windowWithMcap, windowWithoutMcap] = useMemo(() => {
+    const withMcap = windowSnapshots.filter((row) => typeof row.marketCapAvg === "number");
+    const withoutMcap = windowSnapshots.filter((row) => typeof row.marketCapAvg !== "number");
+    return [withMcap, withoutMcap];
+  }, [windowSnapshots]);
 
   const totals = useMemo(() => {
     if (!payload?.protocols) return null;
@@ -397,39 +409,72 @@ export default function PerpsDashboard() {
         <div className="table-section">
           <div className="section-header">
             <h2>Latest Daily Snapshot</h2>
-            <span>Market cap from CoinGecko. P/F uses latest daily fees.</span>
+            <span>Split by CoinGecko market‑cap availability.</span>
           </div>
-          <div className="table-card">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Exchange</th>
-                  <th>Volume</th>
-                  <th>Fees</th>
-                  <th>Open Interest</th>
-                  <th>Market Cap</th>
-                  <th>Take Rate</th>
-                  <th>P/F Ratio</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snapshots.map((row) => (
-                  <tr key={row.slug}>
-                    <td>
-                      <div className="cell-title">{row.name}</div>
-                      <div className="cell-sub">{row.symbol || row.slug}</div>
-                    </td>
-                    <td>{toUSDCompact(row.volume)}</td>
-                    <td>{toUSDCompact(row.fees)}</td>
-                    <td>{toUSDCompact(row.openInterest)}</td>
-                    <td>{toUSDCompact(row.marketCap)}</td>
-                    <td>{toPct(row.takeRate)}</td>
-                    <td>{typeof row.pf === "number" ? `${number.format(row.pf)}x` : "—"}</td>
+          {snapshotsWithMcap.length ? (
+            <div className="table-card">
+              <div className="table-card__title">Tokenized (MCAP available)</div>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Exchange</th>
+                    <th>Volume</th>
+                    <th>Fees</th>
+                    <th>Open Interest</th>
+                    <th>Market Cap</th>
+                    <th>Take Rate</th>
+                    <th>P/F Ratio</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {snapshotsWithMcap.map((row) => (
+                    <tr key={row.slug}>
+                      <td>
+                        <div className="cell-title">{row.name}</div>
+                        <div className="cell-sub">{row.symbol || row.slug}</div>
+                      </td>
+                      <td>{toUSDCompact(row.volume)}</td>
+                      <td>{toUSDCompact(row.fees)}</td>
+                      <td>{toUSDCompact(row.openInterest)}</td>
+                      <td>{toUSDCompact(row.marketCap)}</td>
+                      <td>{toPct(row.takeRate)}</td>
+                      <td>{typeof row.pf === "number" ? `${number.format(row.pf)}x` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {snapshotsWithoutMcap.length ? (
+            <div className="table-card">
+              <div className="table-card__title">No token / MCAP unavailable</div>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Exchange</th>
+                    <th>Volume</th>
+                    <th>Fees</th>
+                    <th>Open Interest</th>
+                    <th>Take Rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {snapshotsWithoutMcap.map((row) => (
+                    <tr key={row.slug}>
+                      <td>
+                        <div className="cell-title">{row.name}</div>
+                        <div className="cell-sub">{row.symbol || row.slug}</div>
+                      </td>
+                      <td>{toUSDCompact(row.volume)}</td>
+                      <td>{toUSDCompact(row.fees)}</td>
+                      <td>{toUSDCompact(row.openInterest)}</td>
+                      <td>{toPct(row.takeRate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -437,39 +482,72 @@ export default function PerpsDashboard() {
         <div className="table-section">
           <div className="section-header">
             <h2>30‑Day Rolling Totals</h2>
-            <span>Rolling sums/averages based on latest 30 days.</span>
+            <span>Split by CoinGecko market‑cap availability.</span>
           </div>
-          <div className="table-card">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Exchange</th>
-                  <th>30d Volume</th>
-                  <th>30d Fees</th>
-                  <th>Avg OI</th>
-                  <th>Avg Market Cap</th>
-                  <th>Take Rate</th>
-                  <th>P/F (avg)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {windowSnapshots.map((row) => (
-                  <tr key={row.slug}>
-                    <td>
-                      <div className="cell-title">{row.name}</div>
-                      <div className="cell-sub">{row.symbol || row.slug}</div>
-                    </td>
-                    <td>{toUSDCompact(row.volumeSum)}</td>
-                    <td>{toUSDCompact(row.feesSum)}</td>
-                    <td>{toUSDCompact(row.openInterestAvg)}</td>
-                    <td>{toUSDCompact(row.marketCapAvg)}</td>
-                    <td>{toPct(row.takeRate)}</td>
-                    <td>{typeof row.pf === "number" ? `${number.format(row.pf)}x` : "—"}</td>
+          {windowWithMcap.length ? (
+            <div className="table-card">
+              <div className="table-card__title">Tokenized (MCAP available)</div>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Exchange</th>
+                    <th>30d Volume</th>
+                    <th>30d Fees</th>
+                    <th>Avg OI</th>
+                    <th>Avg Market Cap</th>
+                    <th>Take Rate</th>
+                    <th>P/F (avg)</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {windowWithMcap.map((row) => (
+                    <tr key={row.slug}>
+                      <td>
+                        <div className="cell-title">{row.name}</div>
+                        <div className="cell-sub">{row.symbol || row.slug}</div>
+                      </td>
+                      <td>{toUSDCompact(row.volumeSum)}</td>
+                      <td>{toUSDCompact(row.feesSum)}</td>
+                      <td>{toUSDCompact(row.openInterestAvg)}</td>
+                      <td>{toUSDCompact(row.marketCapAvg)}</td>
+                      <td>{toPct(row.takeRate)}</td>
+                      <td>{typeof row.pf === "number" ? `${number.format(row.pf)}x` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {windowWithoutMcap.length ? (
+            <div className="table-card">
+              <div className="table-card__title">No token / MCAP unavailable</div>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Exchange</th>
+                    <th>30d Volume</th>
+                    <th>30d Fees</th>
+                    <th>Avg OI</th>
+                    <th>Take Rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {windowWithoutMcap.map((row) => (
+                    <tr key={row.slug}>
+                      <td>
+                        <div className="cell-title">{row.name}</div>
+                        <div className="cell-sub">{row.symbol || row.slug}</div>
+                      </td>
+                      <td>{toUSDCompact(row.volumeSum)}</td>
+                      <td>{toUSDCompact(row.feesSum)}</td>
+                      <td>{toUSDCompact(row.openInterestAvg)}</td>
+                      <td>{toPct(row.takeRate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
