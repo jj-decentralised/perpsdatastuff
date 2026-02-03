@@ -289,6 +289,37 @@ const cleanName = (name: string) =>
     .replace(/perps?|perpetuals?|exchange|protocol|dex|trading/gi, "")
     .replace(/\s+/g, " ")
     .trim();
+
+const normalizeSlug = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const resolveSlug = (raw: string, slugByName: Map<string, string>) => {
+  const direct = slugByName.get(raw) || slugByName.get(raw.toLowerCase());
+  if (direct) return direct;
+  const normalized = normalizeSlug(raw);
+  return slugByName.get(normalized) || normalized;
+};
+
+const aggregateOpenInterestFromYields = (payload: any, slugByName: Map<string, string>) => {
+  const out: Record<string, number> = {};
+  const rows = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const project = row.project || row.projectName || row.protocol || row.name;
+    if (!project) continue;
+    const slug = resolveSlug(String(project), slugByName);
+    const oi =
+      toNumber(row.openInterest) ??
+      toNumber(row.openInterestUsd) ??
+      toNumber(row.open_interest);
+    if (typeof oi !== "number") continue;
+    out[slug] = (out[slug] || 0) + oi;
+  }
+  return out;
+};
 const normalizeMarketCaps = (pairs: any[]) => {
   const out: Record<string, number> = {};
   for (const entry of pairs || []) {
@@ -554,6 +585,13 @@ export async function GET(request: Request) {
     candidates.forEach((item) => {
       slugByName.set(item.name, item.slug);
       slugByName.set(item.name.toLowerCase(), item.slug);
+      slugByName.set(item.slug, item.slug);
+      slugByName.set(item.slug.toLowerCase(), item.slug);
+      const cleaned = cleanName(item.name);
+      if (cleaned) {
+        slugByName.set(cleaned, item.slug);
+        slugByName.set(cleaned.toLowerCase(), item.slug);
+      }
     });
     const overviewVolumeBySlug = normalizeBreakdownSeries(
       overview?.totalDataChartBreakdown,
@@ -565,6 +603,16 @@ export async function GET(request: Request) {
       "open interest",
       "oi"
     ]);
+
+    let yieldsOpenInterestPromise: Promise<Record<string, number>> | null = null;
+    const getYieldsOpenInterest = async () => {
+      if (!yieldsOpenInterestPromise) {
+        yieldsOpenInterestPromise = defillamaFetch("/yields/perps")
+          .then((payload) => aggregateOpenInterestFromYields(payload, slugByName))
+          .catch(() => ({}));
+      }
+      return yieldsOpenInterestPromise;
+    };
 
     const seriesList = await mapLimit(selected, 4, async (protocol) => {
       const [derivativesResult, feesResult, marketCapResult] = await Promise.allSettled([
@@ -640,6 +688,52 @@ export async function GET(request: Request) {
         }
       }
 
+      if (!Object.values(volumeSeries).some((entry) => typeof entry.openInterest === "number")) {
+        try {
+          const oiPayload = await defillamaFetch(
+            `/api/summary/derivatives/${encodeURIComponent(protocol.slug)}`,
+            { dataType: "openInterest" }
+          );
+          const oiSeries = normalizeOpenInterestPayload(oiPayload);
+          if (Object.keys(oiSeries).length) {
+            Object.entries(oiSeries).forEach(([date, value]) => {
+              if (!volumeSeries[date]) volumeSeries[date] = {};
+              volumeSeries[date].openInterest = value;
+            });
+          }
+        } catch (error) {
+          console.warn(`Open interest fetch failed for ${protocol.slug}:`, error);
+        }
+      }
+
+      if (!Object.values(volumeSeries).some((entry) => typeof entry.openInterest === "number")) {
+        const yieldsMap = await getYieldsOpenInterest();
+        const nameKey = cleanName(protocol.name).toLowerCase();
+        const candidates = [
+          protocol.slug,
+          protocol.slug.toLowerCase(),
+          normalizeSlug(protocol.slug),
+          normalizeSlug(protocol.name),
+          nameKey
+        ].filter(Boolean);
+        let fallbackOi: number | null = null;
+        for (const key of candidates) {
+          const value = yieldsMap[key];
+          if (typeof value === "number") {
+            fallbackOi = value;
+            break;
+          }
+        }
+        if (typeof fallbackOi === "number") {
+          const fallbackDate =
+            Object.keys(volumeSeries).sort().slice(-1)[0] ||
+            Object.keys(feesSeries).sort().slice(-1)[0] ||
+            Object.keys(marketCaps).sort().slice(-1)[0] ||
+            new Date().toISOString().slice(0, 10);
+          if (!volumeSeries[fallbackDate]) volumeSeries[fallbackDate] = {};
+          volumeSeries[fallbackDate].openInterest = fallbackOi;
+        }
+      }
       const dateSet = new Set<string>();
       Object.keys(volumeSeries).forEach((date) => dateSet.add(date));
       Object.keys(feesSeries).forEach((date) => dateSet.add(date));
