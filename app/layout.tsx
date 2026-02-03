@@ -1,8 +1,8 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Drift Protocol: Perps Peer Scenarios",
-  description: "Compare Drift Protocol implied market caps using peer P/F and P/V ratios."
+  title: "Perps Pulse: Exchange Correlations",
+  description: "Real-time perpetual exchange dashboard tracking volume, fees, open interest, and market cap correlations."
 };
 
 export const viewport = {
