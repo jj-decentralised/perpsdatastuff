@@ -118,26 +118,34 @@ type WindowRow = SnapshotRow & {
 
 const buildLatestSnapshot = (protocol: ProtocolSeries): SnapshotRow | null => {
   if (!protocol.points.length) return null;
-  const latest = [...protocol.points]
-    .reverse()
-    .find((point) =>
-      [point.volume, point.fees, point.openInterest, point.marketCap].some(
-        (value) => typeof value === "number"
-      )
-    );
-  if (!latest) return null;
-  const takeRate =
-    typeof latest.takeRate === "number" ? latest.takeRate : safeDivide(latest.fees, latest.volume);
-  const pf = safeDivide(latest.marketCap, latest.fees);
+
+  const latestFor = (key: keyof SeriesPoint) =>
+    [...protocol.points].reverse().find((point) => typeof point[key] === "number");
+
+  const latestVolume = latestFor("volume");
+  const latestFees = latestFor("fees");
+  const latestOI = latestFor("openInterest");
+  const latestMcap = latestFor("marketCap");
+
+  const date = latestVolume?.date || latestFees?.date || latestMcap?.date || latestOI?.date;
+  if (!date) return null;
+
+  const volume = latestVolume?.volume ?? null;
+  const fees = latestFees?.fees ?? null;
+  const openInterest = latestOI?.openInterest ?? null;
+  const marketCap = latestMcap?.marketCap ?? null;
+  const takeRate = safeDivide(fees, volume);
+  const pf = safeDivide(marketCap, fees);
+
   return {
     slug: protocol.slug,
     name: protocol.name,
     symbol: protocol.symbol,
-    date: latest.date,
-    volume: latest.volume ?? null,
-    fees: latest.fees ?? null,
-    openInterest: latest.openInterest ?? null,
-    marketCap: latest.marketCap ?? null,
+    date,
+    volume,
+    fees,
+    openInterest,
+    marketCap,
     takeRate,
     pf
   };
@@ -145,15 +153,11 @@ const buildLatestSnapshot = (protocol: ProtocolSeries): SnapshotRow | null => {
 
 const buildWindowSnapshot = (protocol: ProtocolSeries, windowDays: number): WindowRow | null => {
   if (!protocol.points.length) return null;
-  const latest = [...protocol.points]
+  const anchor = [...protocol.points]
     .reverse()
-    .find((point) =>
-      [point.volume, point.fees, point.openInterest, point.marketCap].some(
-        (value) => typeof value === "number"
-      )
-    );
-  if (!latest) return null;
-  const endDate = new Date(latest.date);
+    .find((point) => typeof point.volume === "number" || typeof point.fees === "number");
+  if (!anchor) return null;
+  const endDate = new Date(anchor.date);
   const startDate = new Date(endDate);
   startDate.setUTCDate(startDate.getUTCDate() - (windowDays - 1));
 
@@ -189,11 +193,11 @@ const buildWindowSnapshot = (protocol: ProtocolSeries, windowDays: number): Wind
     slug: protocol.slug,
     name: protocol.name,
     symbol: protocol.symbol,
-    date: latest.date,
-    volume: latest.volume ?? null,
-    fees: latest.fees ?? null,
-    openInterest: latest.openInterest ?? null,
-    marketCap: latest.marketCap ?? null,
+    date: anchor.date,
+    volume: anchor.volume ?? null,
+    fees: anchor.fees ?? null,
+    openInterest: anchor.openInterest ?? null,
+    marketCap: anchor.marketCap ?? null,
     takeRate,
     pf,
     windowDays,
