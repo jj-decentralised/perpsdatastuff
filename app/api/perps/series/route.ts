@@ -79,6 +79,19 @@ const toDateKeyMs = (ms: number) => {
   return dt.toISOString().slice(0, 10);
 };
 
+const toNumber = (value: any) => {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
 const normalizePairSeries = (pairs: any[]) => {
   const out: Record<string, number> = {};
   for (const entry of pairs || []) {
