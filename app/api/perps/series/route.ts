@@ -11,7 +11,7 @@ const COINGECKO_KEY = process.env.COINGECKO_API_KEY || "";
 const COINGECKO_HEADER = process.env.COINGECKO_API_HEADER || "x-cg-pro-api-key";
 
 const DEFAULT_LIMIT = Math.max(1, Number.parseInt(process.env.DERIVATIVES_DASHBOARD_LIMIT || "6", 10));
-const CACHE_TTL_MS = Math.max(0, Number.parseInt(process.env.DASHBOARD_CACHE_TTL_MS || "60000", 10));
+const CACHE_TTL_MS = Math.max(0, Number.parseInt(process.env.DASHBOARD_CACHE_TTL_MS || "0", 10));
 const START_DATE = new Date(Date.UTC(2023, 0, 1));
 
 const defillamaFetch = async (path: string, params?: Record<string, string>) => {

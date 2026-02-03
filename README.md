@@ -1,6 +1,6 @@
 # Perps Dashboard
 
-Real-time perpetual exchange dashboard built with Next.js. It pulls live data from DefiLlama Pro and CoinGecko Pro, then renders time-series and correlation scatter plots.
+Professional, real-time perpetual exchange dashboard built with Next.js. Pulls live DefiLlama Pro + CoinGecko Pro data and renders tables, time-series, and correlation scatter plots for all tracked exchanges in a single view.
 
 ## Setup
 
@@ -18,9 +18,9 @@ npm run dev
 
 Optional:
 - `DERIVATIVES_DASHBOARD_LIMIT` (default 6)
-- `DASHBOARD_CACHE_TTL_MS` (default 60000)
+- `DASHBOARD_CACHE_TTL_MS` (default 0 for real‑time)
 
 ## API
 
 - `GET /api/perps/protocols` → list of derivatives protocols
-- `GET /api/perps/series?slugs=...` → time series for selected protocols
+- `GET /api/perps/series?limit=12` → live series for top exchanges
