@@ -94,33 +94,114 @@ const normalizePairSeries = (pairs: any[]) => {
 };
 
 const normalizeDailyVolume = (items: any[]) => {
-  const out: Record<string, { volume?: number; openInterest?: number } > = {};
+  const out: Record<string, { volume?: number; openInterest?: number }> = {};
   for (const item of items || []) {
     if (!item || typeof item !== "object") continue;
-    const ts = item.date;
+    const ts = item.date ?? item.timestamp ?? item.time;
     if (typeof ts !== "number") continue;
     const dateKey = toDateKey(ts);
     if (new Date(dateKey) < START_DATE) continue;
     if (!out[dateKey]) out[dateKey] = {};
     if (typeof item.volume === "number") out[dateKey].volume = item.volume;
     if (typeof item.openInterest === "number") out[dateKey].openInterest = item.openInterest;
+    if (typeof item.openInterestUsd === "number") out[dateKey].openInterest = item.openInterestUsd;
+    if (typeof item.open_interest === "number") out[dateKey].openInterest = item.open_interest;
   }
   return out;
 };
 
-const normalizeDerivatives = (payload: any) => {
-  if (Array.isArray(payload?.dailyVolume)) {
-    return normalizeDailyVolume(payload.dailyVolume);
-  }
-  if (Array.isArray(payload?.totalDataChart)) {
-    const volumeSeries = normalizePairSeries(payload.totalDataChart);
-    const out: Record<string, { volume?: number; openInterest?: number }> = {};
-    Object.entries(volumeSeries).forEach(([date, value]) => {
-      out[date] = { volume: value };
-    });
+const extractOpenInterestSeries = (payload: any) => {
+  const candidates: Record<string, number>[] = [];
+
+  const isPairSeries = (value: any) =>
+    Array.isArray(value) &&
+    value.length > 0 &&
+    Array.isArray(value[0]) &&
+    typeof value[0][0] === "number" &&
+    typeof value[0][1] === "number";
+
+  const parsePairs = (pairs: any[]) => normalizePairSeries(pairs);
+
+  const parseObjects = (items: any[]) => {
+    const out: Record<string, number> = {};
+    for (const item of items || []) {
+      if (!item || typeof item !== "object") continue;
+      const ts = item.date ?? item.timestamp ?? item.time;
+      if (typeof ts !== "number") continue;
+      const val =
+        typeof item.openInterest === "number"
+          ? item.openInterest
+          : typeof item.openInterestUsd === "number"
+          ? item.openInterestUsd
+          : typeof item.open_interest === "number"
+          ? item.open_interest
+          : null;
+      if (val === null) continue;
+      const dateKey = toDateKey(ts);
+      if (new Date(dateKey) < START_DATE) continue;
+      out[dateKey] = val;
+    }
     return out;
+  };
+
+  const walk = (node: any, keyHint?: string) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      if (node.length && typeof node[0] === "object" && !Array.isArray(node[0])) {
+        const parsed = parseObjects(node);
+        if (Object.keys(parsed).length) candidates.push(parsed);
+      } else if (isPairSeries(node) && keyHint && keyHint.toLowerCase().includes("open")) {
+        const parsed = parsePairs(node);
+        if (Object.keys(parsed).length) candidates.push(parsed);
+      }
+      return;
+    }
+    if (typeof node === "object") {
+      for (const [key, value] of Object.entries(node)) {
+        const lower = key.toLowerCase();
+        if (lower.includes("openinterest") || lower.includes("open_interest")) {
+          if (Array.isArray(value)) {
+            if (isPairSeries(value)) {
+              const parsed = parsePairs(value);
+              if (Object.keys(parsed).length) candidates.push(parsed);
+            } else {
+              const parsed = parseObjects(value);
+              if (Object.keys(parsed).length) candidates.push(parsed);
+            }
+          }
+        }
+        walk(value, key);
+      }
+    }
+  };
+
+  walk(payload);
+  if (!candidates.length) return {} as Record<string, number>;
+  candidates.sort((a, b) => Object.keys(b).length - Object.keys(a).length);
+  return candidates[0];
+};
+
+const normalizeDerivatives = (payload: any) => {
+  let out: Record<string, { volume?: number; openInterest?: number }> = {};
+  if (Array.isArray(payload?.dailyVolume)) {
+    out = normalizeDailyVolume(payload.dailyVolume);
+  } else if (Array.isArray(payload?.totalDataChart)) {
+    const volumeSeries = normalizePairSeries(payload.totalDataChart);
+    out = Object.entries(volumeSeries).reduce((acc, [date, value]) => {
+      acc[date] = { volume: value };
+      return acc;
+    }, {} as Record<string, { volume?: number; openInterest?: number }>);
   }
-  return {} as Record<string, { volume?: number; openInterest?: number }>;
+
+  const oiSeries = extractOpenInterestSeries(payload);
+  if (Object.keys(oiSeries).length) {
+    Object.entries(oiSeries).forEach(([date, value]) => {
+      if (!out[date]) out[date] = {};
+      if (typeof value === "number") out[date].openInterest = value;
+    });
+  }
+
+  return out;
 };
 
 const normalizeBreakdownSeries = (
