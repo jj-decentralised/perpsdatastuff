@@ -21,6 +21,11 @@ const usdCompact = new Intl.NumberFormat("en-US", {
   notation: "compact"
 });
 
+const pct = new Intl.NumberFormat("en-US", {
+  style: "percent",
+  maximumFractionDigits: 2
+});
+
 type ProtocolRow = {
   slug: string;
   name: string;
@@ -40,12 +45,6 @@ type SeriesPoint = {
 
 type ProtocolSeries = ProtocolRow & {
   points: SeriesPoint[];
-};
-
-type ProtocolListResponse = {
-  generatedAt: string;
-  protocols: ProtocolRow[];
-  error?: string;
 };
 
 type SeriesResponse = {
@@ -69,8 +68,13 @@ const pairs = [
 const toUSD = (value?: number | null) => (typeof value === "number" ? usd.format(value) : "—");
 const toUSDCompact = (value?: number | null) =>
   typeof value === "number" ? usdCompact.format(value) : "—";
-const toPct = (value?: number | null) =>
-  typeof value === "number" ? `${(value * 100).toFixed(2)}%` : "—";
+const toPct = (value?: number | null) => (typeof value === "number" ? pct.format(value) : "—");
+
+const safeDivide = (numer?: number | null, denom?: number | null) => {
+  if (typeof numer !== "number" || typeof denom !== "number") return null;
+  if (!Number.isFinite(numer) || !Number.isFinite(denom) || denom <= 0) return null;
+  return numer / denom;
+};
 
 const pearson = (xs: number[], ys: number[]) => {
   if (xs.length < 2 || ys.length < 2 || xs.length !== ys.length) return null;
@@ -91,97 +95,207 @@ const pearson = (xs: number[], ys: number[]) => {
   return num / Math.sqrt(denX * denY);
 };
 
+type SnapshotRow = {
+  slug: string;
+  name: string;
+  symbol?: string | null;
+  date: string;
+  volume?: number | null;
+  fees?: number | null;
+  openInterest?: number | null;
+  marketCap?: number | null;
+  takeRate?: number | null;
+  pf?: number | null;
+};
+
+type WindowRow = SnapshotRow & {
+  windowDays: number;
+  volumeSum?: number | null;
+  feesSum?: number | null;
+  openInterestAvg?: number | null;
+  marketCapAvg?: number | null;
+};
+
+const buildLatestSnapshot = (protocol: ProtocolSeries): SnapshotRow | null => {
+  if (!protocol.points.length) return null;
+  const latest = [...protocol.points]
+    .reverse()
+    .find((point) =>
+      [point.volume, point.fees, point.openInterest, point.marketCap].some(
+        (value) => typeof value === "number"
+      )
+    );
+  if (!latest) return null;
+  const takeRate =
+    typeof latest.takeRate === "number" ? latest.takeRate : safeDivide(latest.fees, latest.volume);
+  const pf = safeDivide(latest.marketCap, latest.fees);
+  return {
+    slug: protocol.slug,
+    name: protocol.name,
+    symbol: protocol.symbol,
+    date: latest.date,
+    volume: latest.volume ?? null,
+    fees: latest.fees ?? null,
+    openInterest: latest.openInterest ?? null,
+    marketCap: latest.marketCap ?? null,
+    takeRate,
+    pf
+  };
+};
+
+const buildWindowSnapshot = (protocol: ProtocolSeries, windowDays: number): WindowRow | null => {
+  if (!protocol.points.length) return null;
+  const latest = [...protocol.points]
+    .reverse()
+    .find((point) =>
+      [point.volume, point.fees, point.openInterest, point.marketCap].some(
+        (value) => typeof value === "number"
+      )
+    );
+  if (!latest) return null;
+  const endDate = new Date(latest.date);
+  const startDate = new Date(endDate);
+  startDate.setUTCDate(startDate.getUTCDate() - (windowDays - 1));
+
+  const windowPoints = protocol.points.filter((point) => {
+    const dt = new Date(point.date);
+    return dt >= startDate && dt <= endDate;
+  });
+
+  const sum = (key: keyof SeriesPoint) => {
+    const values = windowPoints
+      .map((point) => point[key])
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    if (!values.length) return null;
+    return values.reduce((acc, val) => acc + val, 0);
+  };
+
+  const mean = (key: keyof SeriesPoint) => {
+    const values = windowPoints
+      .map((point) => point[key])
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    if (!values.length) return null;
+    return values.reduce((acc, val) => acc + val, 0) / values.length;
+  };
+
+  const volumeSum = sum("volume");
+  const feesSum = sum("fees");
+  const openInterestAvg = mean("openInterest");
+  const marketCapAvg = mean("marketCap");
+  const takeRate = safeDivide(feesSum, volumeSum);
+  const pf = safeDivide(marketCapAvg, feesSum);
+
+  return {
+    slug: protocol.slug,
+    name: protocol.name,
+    symbol: protocol.symbol,
+    date: latest.date,
+    volume: latest.volume ?? null,
+    fees: latest.fees ?? null,
+    openInterest: latest.openInterest ?? null,
+    marketCap: latest.marketCap ?? null,
+    takeRate,
+    pf,
+    windowDays,
+    volumeSum,
+    feesSum,
+    openInterestAvg,
+    marketCapAvg
+  };
+};
+
+const buildTotals = (protocols: ProtocolSeries[]) => {
+  const map = new Map<string, { volume: number; fees: number; oi: number; mcap: number }>();
+  protocols.forEach((protocol) => {
+    protocol.points.forEach((point) => {
+      const entry = map.get(point.date) || { volume: 0, fees: 0, oi: 0, mcap: 0 };
+      if (typeof point.volume === "number") entry.volume += point.volume;
+      if (typeof point.fees === "number") entry.fees += point.fees;
+      if (typeof point.openInterest === "number") entry.oi += point.openInterest;
+      if (typeof point.marketCap === "number") entry.mcap += point.marketCap;
+      map.set(point.date, entry);
+    });
+  });
+
+  const dates = Array.from(map.keys()).sort();
+  return {
+    dates,
+    volume: dates.map((date) => ({ date, value: map.get(date)?.volume ?? null })),
+    fees: dates.map((date) => ({ date, value: map.get(date)?.fees ?? null })),
+    openInterest: dates.map((date) => ({ date, value: map.get(date)?.oi ?? null })),
+    marketCap: dates.map((date) => ({ date, value: map.get(date)?.mcap ?? null }))
+  };
+};
+
 export default function PerpsDashboard() {
-  const [protocols, setProtocols] = useState<ProtocolRow[]>([]);
-  const [selected, setSelected] = useState<string>("");
-  const [series, setSeries] = useState<ProtocolSeries | null>(null);
+  const [payload, setPayload] = useState<SeriesResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
-    fetch("/api/perps/protocols", { cache: "no-store" })
-      .then((res) => res.json())
-      .then((payload: ProtocolListResponse) => {
-        if (!mounted) return;
-        if (payload.error) {
-          setError(payload.error);
-          return;
-        }
-        setProtocols(payload.protocols);
-        if (!selected && payload.protocols.length) {
-          setSelected(payload.protocols[0].slug);
-        }
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setError(err?.message || "Failed to load protocols.");
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [selected]);
-
-  useEffect(() => {
-    if (!selected) return;
-    let mounted = true;
     setLoading(true);
-    setError(null);
-    fetch(`/api/perps/series?slugs=${selected}&fresh=1`, { cache: "no-store" })
+    fetch("/api/perps/series?limit=12&fresh=1", { cache: "no-store" })
       .then((res) => res.json())
-      .then((payload: SeriesResponse) => {
+      .then((data: SeriesResponse) => {
         if (!mounted) return;
-        if (payload.error) {
-          setError(payload.error);
-          setSeries(null);
+        if (data.error) {
+          setError(data.error);
+          setPayload(null);
           return;
         }
-        setSeries(payload.protocols[0] || null);
+        setPayload(data);
       })
       .catch((err) => {
         if (!mounted) return;
-        setError(err?.message || "Failed to load series.");
+        setError(err?.message || "Failed to load live data.");
       })
       .finally(() => {
         if (!mounted) return;
         setLoading(false);
       });
-
     return () => {
       mounted = false;
     };
-  }, [selected]);
+  }, []);
 
-  const latestPoint = useMemo(() => {
-    if (!series?.points?.length) return null;
-    return series.points[series.points.length - 1];
-  }, [series]);
+  const snapshots = useMemo(() => {
+    if (!payload?.protocols) return [];
+    return payload.protocols
+      .map(buildLatestSnapshot)
+      .filter((row): row is SnapshotRow => Boolean(row))
+      .sort((a, b) => (b.volume || 0) - (a.volume || 0));
+  }, [payload]);
 
-  const lineSeries = useMemo(() => {
-    if (!series) return null;
-    return {
-      volume: series.points.map((point) => ({ date: point.date, value: point.volume ?? null })),
-      fees: series.points.map((point) => ({ date: point.date, value: point.fees ?? null })),
-      marketCap: series.points.map((point) => ({ date: point.date, value: point.marketCap ?? null })),
-      openInterest: series.points.map((point) => ({ date: point.date, value: point.openInterest ?? null })),
-      takeRate: series.points.map((point) => ({ date: point.date, value: point.takeRate ?? null }))
-    };
-  }, [series]);
+  const windowSnapshots = useMemo(() => {
+    if (!payload?.protocols) return [];
+    return payload.protocols
+      .map((protocol) => buildWindowSnapshot(protocol, 30))
+      .filter((row): row is WindowRow => Boolean(row))
+      .sort((a, b) => (b.volumeSum || 0) - (a.volumeSum || 0));
+  }, [payload]);
+
+  const totals = useMemo(() => {
+    if (!payload?.protocols) return null;
+    return buildTotals(payload.protocols);
+  }, [payload]);
 
   const scatterData = useMemo(() => {
-    if (!series) return [];
+    if (!payload?.protocols) return [];
     return pairs.map((pair) => {
       const xs: number[] = [];
       const ys: number[] = [];
-      const points = series.points
-        .map((point) => {
-          const xVal = (point as any)[pair.x];
-          const yVal = (point as any)[pair.y];
-          if (typeof xVal !== "number" || typeof yVal !== "number") return null;
-          xs.push(xVal);
-          ys.push(yVal);
-          return { x: xVal, y: yVal };
-        })
+      const points = payload.protocols
+        .flatMap((protocol) =>
+          protocol.points.map((point) => {
+            const xVal = (point as any)[pair.x];
+            const yVal = (point as any)[pair.y];
+            if (typeof xVal !== "number" || typeof yVal !== "number") return null;
+            xs.push(xVal);
+            ys.push(yVal);
+            return { x: xVal, y: yVal };
+          })
+        )
         .filter((point): point is { x: number; y: number } => Boolean(point));
 
       return {
@@ -190,102 +304,236 @@ export default function PerpsDashboard() {
         correlation: pearson(xs, ys)
       };
     });
-  }, [series]);
+  }, [payload]);
+
+  const latestDate = snapshots[0]?.date || payload?.generatedAt?.slice(0, 10) || "—";
+
+  const leaders = useMemo(() => {
+    if (!snapshots.length) return [];
+    const byMetric = (key: keyof SnapshotRow) => {
+      const row = snapshots
+        .filter((item) => typeof item[key] === "number")
+        .sort((a, b) => (Number(b[key]) || 0) - (Number(a[key]) || 0))[0];
+      return row ? (row[key] as number) : null;
+    };
+
+    return [
+      {
+        label: "Volume",
+        row: snapshots
+          .filter((row) => typeof row.volume === "number")
+          .sort((a, b) => (b.volume || 0) - (a.volume || 0))[0],
+        value: byMetric("volume"),
+        display: (value: number | null) => (typeof value === "number" ? toUSDCompact(value) : "—")
+      },
+      {
+        label: "Fees",
+        row: snapshots
+          .filter((row) => typeof row.fees === "number")
+          .sort((a, b) => (b.fees || 0) - (a.fees || 0))[0],
+        value: byMetric("fees"),
+        display: (value: number | null) => (typeof value === "number" ? toUSDCompact(value) : "—")
+      },
+      {
+        label: "Open Interest",
+        row: snapshots
+          .filter((row) => typeof row.openInterest === "number")
+          .sort((a, b) => (b.openInterest || 0) - (a.openInterest || 0))[0],
+        value: byMetric("openInterest"),
+        display: (value: number | null) => (typeof value === "number" ? toUSDCompact(value) : "—")
+      },
+      {
+        label: "Take Rate",
+        row: snapshots
+          .filter((row) => typeof row.takeRate === "number")
+          .sort((a, b) => (b.takeRate || 0) - (a.takeRate || 0))[0],
+        value: byMetric("takeRate"),
+        display: (value: number | null) => (typeof value === "number" ? toPct(value) : "—")
+      },
+      {
+        label: "P/F Ratio",
+        row: snapshots
+          .filter((row) => typeof row.pf === "number")
+          .sort((a, b) => (b.pf || 0) - (a.pf || 0))[0],
+        value: byMetric("pf"),
+        display: (value: number | null) =>
+          typeof value === "number" ? `${number.format(value)}x` : "—"
+      }
+    ];
+  }, [snapshots]);
 
   return (
-    <section className="perps">
-      <div className="perps__header">
+    <section className="dashboard-shell">
+      <header className="hero">
         <div>
-          <div className="perps__kicker">Perpetual Exchange Dashboard</div>
-          <h1>Perps Pulse</h1>
+          <span className="hero__kicker">Perpetual Exchange Intelligence</span>
+          <h1>Perps Market Dashboard</h1>
           <p>
-            Historic volume, fees, open interest, and market cap correlation for top perpetual
-            exchanges. Data updates live from DefiLlama Pro and CoinGecko Pro.
+            Live, daily‑granularity tracking of perps volume, fees, open interest, and market‑cap
+            correlations since January 2023. Data updates continuously from DefiLlama Pro and
+            CoinGecko Pro.
           </p>
         </div>
-        <div className="perps__controls">
-          <label className="control">
-            <span>Protocol</span>
-            <select value={selected} onChange={(event) => setSelected(event.target.value)}>
-              {protocols.map((protocol) => (
-                <option key={protocol.slug} value={protocol.slug}>
-                  {protocol.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="control control--meta">
-            <span>Window</span>
-            <strong>Jan 2023 → Today</strong>
+        <div className="hero__meta">
+          <div>
+            <span>Coverage</span>
+            <strong>Top 12 exchanges by 30‑day volume</strong>
+          </div>
+          <div>
+            <span>Range</span>
+            <strong>Jan 2023 → Present</strong>
+          </div>
+          <div>
+            <span>Latest</span>
+            <strong>{latestDate}</strong>
           </div>
         </div>
-      </div>
+      </header>
 
       {error ? <div className="notice notice--error">{error}</div> : null}
-      {loading ? <div className="notice">Loading live series…</div> : null}
+      {loading ? <div className="notice">Loading live data…</div> : null}
 
-      {series && latestPoint ? (
-        <div className="summary-grid">
-          <div className="summary-card">
-            <div className="summary-card__label">Market Cap</div>
-            <div className="summary-card__value">{toUSDCompact(latestPoint.marketCap)}</div>
+      {snapshots.length ? (
+        <div className="table-section">
+          <div className="section-header">
+            <h2>Latest Daily Snapshot</h2>
+            <span>Market cap from CoinGecko. P/F uses latest daily fees.</span>
           </div>
-          <div className="summary-card">
-            <div className="summary-card__label">Daily Volume</div>
-            <div className="summary-card__value">{toUSDCompact(latestPoint.volume)}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-card__label">Daily Fees</div>
-            <div className="summary-card__value">{toUSDCompact(latestPoint.fees)}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-card__label">Open Interest</div>
-            <div className="summary-card__value">{toUSDCompact(latestPoint.openInterest)}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-card__label">Take Rate</div>
-            <div className="summary-card__value">{toPct(latestPoint.takeRate)}</div>
+          <div className="table-card">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Exchange</th>
+                  <th>Volume</th>
+                  <th>Fees</th>
+                  <th>Open Interest</th>
+                  <th>Market Cap</th>
+                  <th>Take Rate</th>
+                  <th>P/F Ratio</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snapshots.map((row) => (
+                  <tr key={row.slug}>
+                    <td>
+                      <div className="cell-title">{row.name}</div>
+                      <div className="cell-sub">{row.symbol || row.slug}</div>
+                    </td>
+                    <td>{toUSDCompact(row.volume)}</td>
+                    <td>{toUSDCompact(row.fees)}</td>
+                    <td>{toUSDCompact(row.openInterest)}</td>
+                    <td>{toUSDCompact(row.marketCap)}</td>
+                    <td>{toPct(row.takeRate)}</td>
+                    <td>{typeof row.pf === "number" ? `${number.format(row.pf)}x` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       ) : null}
 
-      {series && lineSeries ? (
+      {windowSnapshots.length ? (
+        <div className="table-section">
+          <div className="section-header">
+            <h2>30‑Day Rolling Totals</h2>
+            <span>Rolling sums/averages based on latest 30 days.</span>
+          </div>
+          <div className="table-card">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Exchange</th>
+                  <th>30d Volume</th>
+                  <th>30d Fees</th>
+                  <th>Avg OI</th>
+                  <th>Avg Market Cap</th>
+                  <th>Take Rate</th>
+                  <th>P/F (avg)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {windowSnapshots.map((row) => (
+                  <tr key={row.slug}>
+                    <td>
+                      <div className="cell-title">{row.name}</div>
+                      <div className="cell-sub">{row.symbol || row.slug}</div>
+                    </td>
+                    <td>{toUSDCompact(row.volumeSum)}</td>
+                    <td>{toUSDCompact(row.feesSum)}</td>
+                    <td>{toUSDCompact(row.openInterestAvg)}</td>
+                    <td>{toUSDCompact(row.marketCapAvg)}</td>
+                    <td>{toPct(row.takeRate)}</td>
+                    <td>{typeof row.pf === "number" ? `${number.format(row.pf)}x` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {leaders.length ? (
+        <div className="table-section">
+          <div className="section-header">
+            <h2>Metric Leaders</h2>
+            <span>Top exchange by metric in the latest snapshot.</span>
+          </div>
+          <div className="table-card">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Leader</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leaders.map((leader) => (
+                  <tr key={leader.label}>
+                    <td>{leader.label}</td>
+                    <td>{leader.row ? leader.row.name : "—"}</td>
+                    <td>{leader.display(leader.value)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {totals ? (
         <div className="charts-grid">
           <LineChart
-            title="Daily Volume"
-            subtitle="Perps traded volume"
-            series={[{ label: "Volume", color: "#111", values: lineSeries.volume }]}
+            title="Total Daily Volume"
+            subtitle="Sum of tracked exchanges"
+            series={[{ label: "Volume", color: "#111", values: totals.volume }]}
           />
           <LineChart
-            title="Daily Fees"
-            subtitle="Fees generated"
-            series={[{ label: "Fees", color: "#303030", values: lineSeries.fees }]}
+            title="Total Daily Fees"
+            subtitle="Sum of tracked exchanges"
+            series={[{ label: "Fees", color: "#333", values: totals.fees }]}
           />
           <LineChart
-            title="Market Cap"
+            title="Total Open Interest"
+            subtitle="Sum of tracked exchanges"
+            series={[{ label: "Open Interest", color: "#555", values: totals.openInterest }]}
+          />
+          <LineChart
+            title="Total Market Cap"
             subtitle="CoinGecko market cap"
-            series={[{ label: "MCAP", color: "#5b5b5b", values: lineSeries.marketCap }]}
-          />
-          <LineChart
-            title="Open Interest"
-            subtitle="Perps open interest"
-            series={[{ label: "OI", color: "#7a7a7a", values: lineSeries.openInterest }]}
-          />
-          <LineChart
-            title="Take Rate"
-            subtitle="Fees ÷ volume"
-            series={[{ label: "Take Rate", color: "#000", values: lineSeries.takeRate }]}
+            series={[{ label: "Market Cap", color: "#777", values: totals.marketCap }]}
           />
         </div>
       ) : null}
 
-      {series ? (
+      {scatterData.length ? (
         <div className="scatter-grid">
           {scatterData.map((pair) => (
             <ScatterPlot
               key={pair.key}
               title={pair.label}
-              subtitle={series.name}
+              subtitle="All tracked exchanges"
               points={pair.points}
               xLabel={pair.x}
               yLabel={pair.y}
@@ -295,12 +543,10 @@ export default function PerpsDashboard() {
         </div>
       ) : null}
 
-      {series ? (
-        <div className="footnote">
-          Latest snapshot: {latestPoint?.date || "—"}. Fees and volume are daily totals from
-          DefiLlama. Market cap is daily CoinGecko. Take rate is fees divided by volume.
-        </div>
-      ) : null}
+      <div className="footnote">
+        Lowest‑granularity data: daily series from DefiLlama Pro and CoinGecko Pro. Take rate = fees
+        ÷ volume. P/F ratio = market cap ÷ daily fees.
+      </div>
     </section>
   );
 }
