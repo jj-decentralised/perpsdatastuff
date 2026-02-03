@@ -235,7 +235,7 @@ export async function GET(request: Request) {
     }
 
     const seriesList = await mapLimit(selected, 4, async (protocol) => {
-      const [derivatives, fees, marketCap] = await Promise.all([
+      const [derivativesResult, feesResult, marketCapResult] = await Promise.allSettled([
         defillamaFetch(`/api/summary/derivatives/${encodeURIComponent(protocol.slug)}`),
         defillamaFetch(`/api/summary/fees/${encodeURIComponent(protocol.slug)}`, {
           dataType: "dailyFees"
@@ -248,6 +248,21 @@ export async function GET(request: Request) {
             })
           : Promise.resolve(null)
       ]);
+
+      if (derivativesResult.status === "rejected") {
+        console.warn(`Derivatives fetch failed for ${protocol.slug}:`, derivativesResult.reason);
+      }
+      if (feesResult.status === "rejected") {
+        console.warn(`Fees fetch failed for ${protocol.slug}:`, feesResult.reason);
+      }
+      if (marketCapResult.status === "rejected") {
+        console.warn(`Market cap fetch failed for ${protocol.slug}:`, marketCapResult.reason);
+      }
+
+      const derivatives =
+        derivativesResult.status === "fulfilled" ? derivativesResult.value : null;
+      const fees = feesResult.status === "fulfilled" ? feesResult.value : null;
+      const marketCap = marketCapResult.status === "fulfilled" ? marketCapResult.value : null;
 
       const volumeSeries = normalizeDailyVolume(derivatives?.dailyVolume || []);
       const feesSeries = normalizePairSeries(fees?.totalDataChart || []);
