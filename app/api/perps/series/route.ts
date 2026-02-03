@@ -12,6 +12,10 @@ const COINGECKO_HEADER = process.env.COINGECKO_API_HEADER || "x-cg-pro-api-key";
 
 const DEFAULT_LIMIT = Math.max(1, Number.parseInt(process.env.DERIVATIVES_DASHBOARD_LIMIT || "6", 10));
 const CACHE_TTL_MS = Math.max(0, Number.parseInt(process.env.DASHBOARD_CACHE_TTL_MS || "0", 10));
+const COINGECKO_RESOLVE_TTL_MS = Math.max(
+  0,
+  Number.parseInt(process.env.COINGECKO_RESOLVE_TTL_MS || "86400000", 10)
+);
 const START_DATE = new Date(Date.UTC(2023, 0, 1));
 
 const defillamaFetch = async (path: string, params?: Record<string, string>) => {
@@ -185,6 +189,7 @@ type ProtocolSeries = ProtocolMeta & {
 };
 
 const cache: Record<string, { expiresAt: number; payload: any }> = {};
+const geckoCache: Record<string, { expiresAt: number; id: string | null }> = {};
 
 const getCache = (key: string) => {
   const entry = cache[key];
@@ -199,6 +204,56 @@ const getCache = (key: string) => {
 const setCache = (key: string, payload: any) => {
   if (CACHE_TTL_MS <= 0) return;
   cache[key] = { expiresAt: Date.now() + CACHE_TTL_MS, payload };
+};
+
+const getGeckoCache = (key: string) => {
+  const entry = geckoCache[key];
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    delete geckoCache[key];
+    return null;
+  }
+  return entry.id;
+};
+
+const setGeckoCache = (key: string, id: string | null) => {
+  if (COINGECKO_RESOLVE_TTL_MS <= 0) return;
+  geckoCache[key] = { expiresAt: Date.now() + COINGECKO_RESOLVE_TTL_MS, id };
+};
+
+const pickCoinGeckoId = (protocol: ProtocolMeta, coins: any[]) => {
+  if (!Array.isArray(coins) || !coins.length) return null;
+  const symbol = (protocol.symbol || "").toLowerCase();
+  const name = protocol.name.toLowerCase();
+
+  const exactSymbol = coins.find((coin) => symbol && coin.symbol?.toLowerCase() === symbol);
+  if (exactSymbol) return exactSymbol.id;
+
+  const exactName = coins.find((coin) => coin.name?.toLowerCase() === name);
+  if (exactName) return exactName.id;
+
+  const nameMatch = coins.find((coin) => coin.name?.toLowerCase().includes(name));
+  if (nameMatch) return nameMatch.id;
+
+  const fallback = coins
+    .filter((coin) => typeof coin.market_cap_rank === "number")
+    .sort((a, b) => a.market_cap_rank - b.market_cap_rank)[0];
+  return (fallback || coins[0]).id || null;
+};
+
+const resolveCoinGeckoId = async (protocol: ProtocolMeta, overrides: Record<string, string>) => {
+  if (protocol.gecko_id) return protocol.gecko_id;
+  if (overrides[protocol.slug]) return overrides[protocol.slug];
+  if (!COINGECKO_KEY) return null;
+
+  const cacheKey = protocol.slug;
+  const cached = getGeckoCache(cacheKey);
+  if (cached) return cached;
+
+  const payload = await coingeckoFetch("/search", { query: protocol.name });
+  const id = pickCoinGeckoId(protocol, payload?.coins || []) || null;
+  setGeckoCache(cacheKey, id);
+  return id;
 };
 
 export async function GET(request: Request) {
@@ -220,6 +275,20 @@ export async function GET(request: Request) {
       defillamaFetch("/api/overview/derivatives"),
       defillamaFetch("/api/protocols")
     ]);
+
+    const overrides = (() => {
+      const raw = process.env.COINGECKO_ID_OVERRIDES;
+      if (!raw) return {} as Record<string, string>;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          return parsed as Record<string, string>;
+        }
+      } catch {
+        return {} as Record<string, string>;
+      }
+      return {} as Record<string, string>;
+    })();
 
     const protocolMeta = new Map<string, ProtocolMeta>();
     const protocolPayload = Array.isArray(protocols) ? protocols : protocols?.protocols || [];
@@ -273,6 +342,11 @@ export async function GET(request: Request) {
     } else {
       selected = candidates.slice(0, limit);
     }
+
+    selected = await mapLimit(selected, 3, async (protocol) => {
+      const gecko_id = await resolveCoinGeckoId(protocol, overrides);
+      return { ...protocol, gecko_id: gecko_id || protocol.gecko_id };
+    });
 
     const slugByName = new Map<string, string>();
     candidates.forEach((item) => {
