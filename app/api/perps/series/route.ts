@@ -228,6 +228,67 @@ const normalizeBreakdownSeries = (
   }
   return out;
 };
+
+const pickNumber = (obj: any, keys: string[]) => {
+  if (!obj || typeof obj !== "object") return null;
+  for (const key of keys) {
+    const value = obj[key as keyof typeof obj];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return null;
+};
+
+const extractBreakdownSeries = (
+  payload: any,
+  slugByName: Map<string, string>,
+  hints: string[]
+) => {
+  const candidates: any[] = [];
+
+  const isBreakdown = (value: any) =>
+    Array.isArray(value) &&
+    value.length > 0 &&
+    Array.isArray(value[0]) &&
+    value[0].length >= 2 &&
+    typeof value[0][0] === "number" &&
+    value[0][1] &&
+    typeof value[0][1] === "object";
+
+  const walk = (node: any, keyHint?: string) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      if (isBreakdown(node) && keyHint) {
+        const lower = keyHint.toLowerCase();
+        if (hints.some((hint) => lower.includes(hint))) {
+          candidates.push(node);
+        }
+      }
+      return;
+    }
+    if (typeof node === "object") {
+      for (const [key, value] of Object.entries(node)) {
+        const lower = key.toLowerCase();
+        if (hints.some((hint) => lower.includes(hint)) && isBreakdown(value)) {
+          candidates.push(value);
+        }
+        walk(value, key);
+      }
+    }
+  };
+
+  walk(payload);
+  if (!candidates.length) return {};
+
+  candidates.sort((a, b) => b.length - a.length);
+  return normalizeBreakdownSeries(candidates[0], slugByName);
+};
+
+const cleanName = (name: string) =>
+  name
+    .replace(/\(.*?\)/g, "")
+    .replace(/perps?|perpetuals?|exchange|protocol|dex|trading/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
 const normalizeMarketCaps = (pairs: any[]) => {
   const out: Record<string, number> = {};
   for (const entry of pairs || []) {
@@ -254,6 +315,8 @@ type ProtocolMeta = {
   symbol?: string | null;
   gecko_id?: string | null;
   volume_30d?: number | null;
+  openInterest?: number | null;
+  marketCap?: number | null;
 };
 
 type SeriesPoint = {
@@ -331,8 +394,16 @@ const resolveCoinGeckoId = async (protocol: ProtocolMeta, overrides: Record<stri
   const cached = getGeckoCache(cacheKey);
   if (cached) return cached;
 
-  const payload = await coingeckoFetch("/search", { query: protocol.name });
-  const id = pickCoinGeckoId(protocol, payload?.coins || []) || null;
+  const queries = Array.from(
+    new Set([protocol.name, cleanName(protocol.name), protocol.symbol || ""].filter(Boolean))
+  );
+
+  let id: string | null = null;
+  for (const query of queries) {
+    const payload = await coingeckoFetch("/search", { query });
+    id = pickCoinGeckoId(protocol, payload?.coins || []) || null;
+    if (id) break;
+  }
   setGeckoCache(cacheKey, id);
   return id;
 };
@@ -358,17 +429,38 @@ export async function GET(request: Request) {
     ]);
 
     const overrides = (() => {
+      const staticOverrides: Record<string, string> = {
+        "drift-trade": "drift-protocol",
+        "dydx-v4": "dydx",
+        "gmx-v1-perps": "gmx",
+        "gmx-v2": "gmx",
+        "gmx": "gmx",
+        "aevo-perps": "aevo",
+        "vertex-perps": "vertex-protocol",
+        "gains-network": "gains-network",
+        "hyperliquid": "hyperliquid",
+        "hyperliquid-perps": "hyperliquid",
+        "ordersly": "ordersly",
+        "paradex": "paradex",
+        "paradex-perps": "paradex",
+        "hlp": "hyperliquid",
+        "synthetix-perps": "synthetix",
+        "kiloex-perps": "kiloex",
+        "apex-omni": "apex-protocol",
+        "apex": "apex-protocol"
+      };
+
       const raw = process.env.COINGECKO_ID_OVERRIDES;
-      if (!raw) return {} as Record<string, string>;
+      if (!raw) return staticOverrides;
       try {
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === "object") {
-          return parsed as Record<string, string>;
+          return { ...staticOverrides, ...(parsed as Record<string, string>) };
         }
       } catch {
-        return {} as Record<string, string>;
+        return staticOverrides;
       }
-      return {} as Record<string, string>;
+      return staticOverrides;
     })();
 
     const protocolMeta = new Map<string, ProtocolMeta>();
@@ -381,7 +473,8 @@ export async function GET(request: Request) {
         slug: String(slug),
         name: String(item.name || item.displayName || slug),
         symbol: item.symbol || item.tokenSymbol || null,
-        gecko_id: item.gecko_id || null
+        gecko_id: item.gecko_id || item.geckoId || item.geckoID || null,
+        marketCap: pickNumber(item, ["mcap", "marketCap", "market_cap", "mcapUsd", "marketCapUsd"])
       });
     }
 
@@ -398,7 +491,21 @@ export async function GET(request: Request) {
         };
         candidates.push({
           ...meta,
-          volume_30d: typeof item.total30d === "number" ? item.total30d : null
+          volume_30d: pickNumber(item, [
+            "total30d",
+            "volume30d",
+            "total30dUsd",
+            "volume30dUsd",
+            "total30dVolume"
+          ]),
+          openInterest: pickNumber(item, [
+            "openInterest",
+            "openInterestUsd",
+            "open_interest",
+            "open_interest_usd",
+            "oi",
+            "totalOpenInterest"
+          ])
         });
       }
     } else if (protocolsRaw && typeof protocolsRaw === "object") {
@@ -409,7 +516,21 @@ export async function GET(request: Request) {
         };
         candidates.push({
           ...meta,
-          volume_30d: typeof (info as any)?.volume30d === "number" ? (info as any).volume30d : null
+          volume_30d: pickNumber(info, [
+            "volume30d",
+            "total30d",
+            "total30dUsd",
+            "volume30dUsd",
+            "total30dVolume"
+          ]),
+          openInterest: pickNumber(info, [
+            "openInterest",
+            "openInterestUsd",
+            "open_interest",
+            "open_interest_usd",
+            "oi",
+            "totalOpenInterest"
+          ])
         });
       }
     }
@@ -438,6 +559,12 @@ export async function GET(request: Request) {
       overview?.totalDataChartBreakdown,
       slugByName
     );
+    const overviewOpenInterestBySlug = extractBreakdownSeries(overview, slugByName, [
+      "openinterest",
+      "open_interest",
+      "open interest",
+      "oi"
+    ]);
 
     const seriesList = await mapLimit(selected, 4, async (protocol) => {
       const [derivativesResult, feesResult, marketCapResult] = await Promise.allSettled([
@@ -477,8 +604,41 @@ export async function GET(request: Request) {
           return acc;
         }, {} as Record<string, { volume?: number; openInterest?: number }>);
       }
+      const hasOpenInterest = Object.values(volumeSeries).some(
+        (entry) => typeof entry.openInterest === "number"
+      );
+      if (!hasOpenInterest && overviewOpenInterestBySlug[protocol.slug]) {
+        const fallback = overviewOpenInterestBySlug[protocol.slug];
+        Object.entries(fallback).forEach(([date, value]) => {
+          if (!volumeSeries[date]) volumeSeries[date] = {};
+          volumeSeries[date].openInterest = value;
+        });
+      }
       const feesSeries = normalizePairSeries(fees?.totalDataChart || []);
       const marketCaps = normalizeMarketCaps(marketCap?.market_caps || []);
+
+      const hasMarketCaps = Object.keys(marketCaps).length > 0;
+      if (!hasMarketCaps && typeof protocol.marketCap === "number") {
+        const fallbackDate =
+          Object.keys(volumeSeries).sort().slice(-1)[0] ||
+          Object.keys(feesSeries).sort().slice(-1)[0];
+        if (fallbackDate) {
+          marketCaps[fallbackDate] = protocol.marketCap;
+        }
+      }
+
+      if (
+        typeof protocol.openInterest === "number" &&
+        !Object.values(volumeSeries).some((entry) => typeof entry.openInterest === "number")
+      ) {
+        const fallbackDate =
+          Object.keys(volumeSeries).sort().slice(-1)[0] ||
+          Object.keys(feesSeries).sort().slice(-1)[0];
+        if (fallbackDate) {
+          if (!volumeSeries[fallbackDate]) volumeSeries[fallbackDate] = {};
+          volumeSeries[fallbackDate].openInterest = protocol.openInterest;
+        }
+      }
 
       const dateSet = new Set<string>();
       Object.keys(volumeSeries).forEach((date) => dateSet.add(date));

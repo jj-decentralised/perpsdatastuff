@@ -52,7 +52,7 @@ export async function GET() {
       if (!slug) continue;
       protocolMeta.set(String(slug), {
         symbol: item.symbol || item.tokenSymbol || null,
-        gecko_id: item.gecko_id || null,
+        gecko_id: item.gecko_id || item.geckoId || item.geckoID || null,
         name: item.name || item.displayName || null
       });
     }
